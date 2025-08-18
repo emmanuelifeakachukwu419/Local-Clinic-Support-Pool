@@ -9,11 +9,17 @@
 (define-constant ERR_VOTING_ENDED (err u107))
 (define-constant ERR_NOT_ORACLE (err u108))
 (define-constant ERR_INVALID_PERFORMANCE (err u109))
+(define-constant ERR_REWARD_ALREADY_CLAIMED (err u110))
+(define-constant ERR_INSUFFICIENT_TIER (err u111))
 
 (define-constant MIN_DONATION u1000000)
 (define-constant MIN_PERFORMANCE_SCORE u70)
 (define-constant VOTING_PERIOD u144)
 (define-constant DISBURSEMENT_INTERVAL u1008)
+(define-constant BRONZE_TIER_THRESHOLD u5000000)
+(define-constant SILVER_TIER_THRESHOLD u20000000)
+(define-constant GOLD_TIER_THRESHOLD u50000000)
+(define-constant PLATINUM_TIER_THRESHOLD u100000000)
 
 (define-data-var total-pool-balance uint u0)
 (define-data-var next-clinic-id uint u1)
@@ -59,19 +65,41 @@
   { score: uint, updated-block: uint }
 )
 
+(define-map donor-loyalty-tiers
+  { donor: principal }
+  {
+    tier: (string-ascii 20),
+    milestone-rewards-claimed: uint,
+    voting-power-multiplier: uint,
+    last-tier-update: uint
+  }
+)
+
+(define-map milestone-rewards
+  { donor: principal, milestone: uint }
+  { claimed: bool, reward-amount: uint, claim-block: uint }
+)
+
 (define-public (donate (amount uint))
-  (begin
-    (asserts! (>= amount MIN_DONATION) ERR_INVALID_AMOUNT)
-    (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
-    (var-set total-pool-balance (+ (var-get total-pool-balance) amount))
-    (map-set donor-contributions
-      { donor: tx-sender }
-      {
-        total-donated: (+ amount (get total-donated (default-to { total-donated: u0, last-donation-block: u0 } (map-get? donor-contributions { donor: tx-sender })))),
-        last-donation-block: stacks-block-height
-      }
+  (let
+    (
+      (previous-contribution (default-to { total-donated: u0, last-donation-block: u0 } (map-get? donor-contributions { donor: tx-sender })))
+      (new-total (+ amount (get total-donated previous-contribution)))
     )
-    (ok amount)
+    (begin
+      (asserts! (>= amount MIN_DONATION) ERR_INVALID_AMOUNT)
+      (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+      (var-set total-pool-balance (+ (var-get total-pool-balance) amount))
+      (map-set donor-contributions
+        { donor: tx-sender }
+        {
+          total-donated: new-total,
+          last-donation-block: stacks-block-height
+        }
+      )
+      (update-donor-tier tx-sender new-total)
+      (ok amount)
+    )
   )
 )
 
@@ -109,21 +137,26 @@
     (asserts! (<= current-block (get end-block voting-session)) ERR_VOTING_ENDED)
     (asserts! (is-none (map-get? clinic-votes { clinic-id: clinic-id, voter: tx-sender })) ERR_ALREADY_VOTED)
     
-    (map-set clinic-votes
-      { clinic-id: clinic-id, voter: tx-sender }
+    (let
+    (
+      (voting-power (get-voting-power tx-sender))
+      )
+      (map-set clinic-votes
+        { clinic-id: clinic-id, voter: tx-sender }
       { vote: vote, block-height: current-block }
     )
     
     (map-set voting-sessions
-      { clinic-id: clinic-id }
-      (merge voting-session
+    { clinic-id: clinic-id }
+    (merge voting-session
         {
-          yes-votes: (if vote (+ (get yes-votes voting-session) u1) (get yes-votes voting-session)),
-          no-votes: (if vote (get no-votes voting-session) (+ (get no-votes voting-session) u1))
-        }
+            yes-votes: (if vote (+ (get yes-votes voting-session) voting-power) (get yes-votes voting-session)),
+            no-votes: (if vote (get no-votes voting-session) (+ (get no-votes voting-session) voting-power))
+          }
+        )
       )
+      (ok vote)
     )
-    (ok vote)
   )
 )
 
@@ -241,6 +274,117 @@
   )
 )
 
+(define-public (claim-milestone-reward (milestone uint))
+  (let
+    (
+      (donor-stats (unwrap! (map-get? donor-contributions { donor: tx-sender }) ERR_CLINIC_NOT_FOUND))
+      (reward-key { donor: tx-sender, milestone: milestone })
+      (existing-reward (map-get? milestone-rewards reward-key))
+    )
+    (asserts! (is-none existing-reward) ERR_REWARD_ALREADY_CLAIMED)
+    (let
+      (
+        (total-donated (get total-donated donor-stats))
+        (reward-amount (calculate-milestone-reward milestone total-donated))
+      )
+      (asserts! (> reward-amount u0) ERR_INSUFFICIENT_TIER)
+      (asserts! (<= reward-amount (var-get total-pool-balance)) ERR_INSUFFICIENT_FUNDS)
+      
+      (try! (as-contract (stx-transfer? reward-amount tx-sender tx-sender)))
+      (var-set total-pool-balance (- (var-get total-pool-balance) reward-amount))
+      
+      (map-set milestone-rewards
+        reward-key
+        {
+          claimed: true,
+          reward-amount: reward-amount,
+          claim-block: stacks-block-height
+        }
+      )
+      (ok reward-amount)
+    )
+  )
+)
+
+(define-private (update-donor-tier (donor principal) (total-donated uint))
+  (let
+    (
+      (current-tier (get-donor-tier-name total-donated))
+      (voting-multiplier (get-tier-voting-multiplier total-donated))
+    )
+    (map-set donor-loyalty-tiers
+      { donor: donor }
+      {
+        tier: current-tier,
+        milestone-rewards-claimed: (get milestone-rewards-claimed (default-to { tier: "basic", milestone-rewards-claimed: u0, voting-power-multiplier: u1, last-tier-update: u0 } (map-get? donor-loyalty-tiers { donor: donor }))),
+        voting-power-multiplier: voting-multiplier,
+        last-tier-update: stacks-block-height
+      }
+    )
+    true
+  )
+)
+
+(define-private (calculate-milestone-reward (milestone uint) (total-donated uint))
+  (if (is-eq milestone u1)
+    (if (>= total-donated BRONZE_TIER_THRESHOLD) u100000 u0)
+    (if (is-eq milestone u2)
+      (if (>= total-donated SILVER_TIER_THRESHOLD) u250000 u0)
+      (if (is-eq milestone u3)
+        (if (>= total-donated GOLD_TIER_THRESHOLD) u500000 u0)
+        (if (is-eq milestone u4)
+          (if (>= total-donated PLATINUM_TIER_THRESHOLD) u1000000 u0)
+          u0
+        )
+      )
+    )
+  )
+)
+
+(define-private (get-donor-tier-name (total-donated uint))
+  (if (>= total-donated PLATINUM_TIER_THRESHOLD)
+    "platinum"
+    (if (>= total-donated GOLD_TIER_THRESHOLD)
+      "gold"
+      (if (>= total-donated SILVER_TIER_THRESHOLD)
+        "silver"
+        (if (>= total-donated BRONZE_TIER_THRESHOLD)
+          "bronze"
+          "basic"
+        )
+      )
+    )
+  )
+)
+
+(define-private (get-tier-voting-multiplier (total-donated uint))
+  (if (>= total-donated PLATINUM_TIER_THRESHOLD)
+    u5
+    (if (>= total-donated GOLD_TIER_THRESHOLD)
+      u4
+      (if (>= total-donated SILVER_TIER_THRESHOLD)
+        u3
+        (if (>= total-donated BRONZE_TIER_THRESHOLD)
+          u2
+          u1
+        )
+      )
+    )
+  )
+)
+
+(define-private (get-voting-power (voter principal))
+  (let
+    (
+      (tier-info (map-get? donor-loyalty-tiers { donor: voter }))
+    )
+    (match tier-info
+      tier-data (get voting-power-multiplier tier-data)
+      u1
+    )
+  )
+)
+
 (define-private (start-voting-session (clinic-id uint) (proposal-type (string-ascii 20)))
   (begin
     (map-set voting-sessions
@@ -310,4 +454,44 @@
       none
     )
   )
+)
+
+(define-read-only (get-donor-tier (donor principal))
+  (map-get? donor-loyalty-tiers { donor: donor })
+)
+
+(define-read-only (get-milestone-reward-status (donor principal) (milestone uint))
+  (map-get? milestone-rewards { donor: donor, milestone: milestone })
+)
+
+(define-read-only (calculate-available-milestone-rewards (donor principal))
+  (let
+    (
+      (donor-stats (map-get? donor-contributions { donor: donor }))
+    )
+    (match donor-stats
+      stats
+      (let
+        (
+          (total-donated (get total-donated stats))
+        )
+        {
+          milestone-1: (calculate-milestone-reward u1 total-donated),
+          milestone-2: (calculate-milestone-reward u2 total-donated),
+          milestone-3: (calculate-milestone-reward u3 total-donated),
+          milestone-4: (calculate-milestone-reward u4 total-donated)
+        }
+      )
+      {
+        milestone-1: u0,
+        milestone-2: u0,
+        milestone-3: u0,
+        milestone-4: u0
+      }
+    )
+  )
+)
+
+(define-read-only (get-donor-voting-power (donor principal))
+  (get-voting-power donor)
 )
