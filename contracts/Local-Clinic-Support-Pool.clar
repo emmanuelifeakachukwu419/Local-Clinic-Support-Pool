@@ -11,6 +11,8 @@
 (define-constant ERR_INVALID_PERFORMANCE (err u109))
 (define-constant ERR_REWARD_ALREADY_CLAIMED (err u110))
 (define-constant ERR_INSUFFICIENT_TIER (err u111))
+(define-constant ERR_INVALID_AUDIT_QUERY (err u112))
+(define-constant ERR_AUDIT_LOG_FULL (err u113))
 
 (define-constant MIN_DONATION u1000000)
 (define-constant MIN_PERFORMANCE_SCORE u70)
@@ -20,10 +22,12 @@
 (define-constant SILVER_TIER_THRESHOLD u20000000)
 (define-constant GOLD_TIER_THRESHOLD u50000000)
 (define-constant PLATINUM_TIER_THRESHOLD u100000000)
+(define-constant MAX_AUDIT_EVENTS_PER_CLINIC u100)
 
 (define-data-var total-pool-balance uint u0)
 (define-data-var next-clinic-id uint u1)
 (define-data-var oracle-address principal CONTRACT_OWNER)
+(define-data-var next-audit-event-id uint u1)
 
 (define-map clinics
   { clinic-id: uint }
@@ -80,6 +84,24 @@
   { claimed: bool, reward-amount: uint, claim-block: uint }
 )
 
+(define-map audit-events
+  { event-id: uint }
+  {
+    clinic-id: uint,
+    event-type: (string-ascii 30),
+    actor: principal,
+    details: (string-ascii 200),
+    timestamp: uint,
+    block-height: uint,
+    additional-data: (optional uint)
+  }
+)
+
+(define-map clinic-audit-counters
+  { clinic-id: uint }
+  { event-count: uint, last-event-id: uint }
+)
+
 (define-public (donate (amount uint))
   (let
     (
@@ -123,6 +145,7 @@
     )
     (var-set next-clinic-id (+ clinic-id u1))
     (start-voting-session clinic-id "approval")
+    (log-audit-event clinic-id "clinic_registered" tx-sender "Clinic registration initiated" (some clinic-id))
     (ok clinic-id)
   )
 )
@@ -184,6 +207,7 @@
         { clinic-id: clinic-id }
         (merge voting-session { is-active: false })
       )
+      (log-audit-event clinic-id "voting_finalized" tx-sender (if approved "Clinic approved by community vote" "Clinic rejected by community vote") (some (if approved u1 u0)))
       (ok approved)
     )
   )
@@ -212,6 +236,7 @@
       { clinic-id: clinic-id, period: (/ stacks-block-height DISBURSEMENT_INTERVAL) }
       { score: score, updated-block: stacks-block-height }
     )
+    (log-audit-event clinic-id "performance_updated" tx-sender "Performance score updated by oracle" (some score))
     (ok score)
   )
 )
@@ -242,6 +267,7 @@
           { total-received: (+ (get total-received clinic-data) disbursement-amount) }
         )
       )
+      (log-audit-event clinic-id "funds_disbursed" tx-sender "Funds disbursed to clinic" (some disbursement-amount))
       (ok disbursement-amount)
     )
   )
@@ -402,6 +428,42 @@
   )
 )
 
+(define-private (log-audit-event (clinic-id uint) (event-type (string-ascii 30)) (actor principal) (details (string-ascii 200)) (additional-data (optional uint)))
+  (let
+    (
+      (event-id (var-get next-audit-event-id))
+      (current-counter (default-to { event-count: u0, last-event-id: u0 } (map-get? clinic-audit-counters { clinic-id: clinic-id })))
+      (new-event-count (+ (get event-count current-counter) u1))
+    )
+    (if (<= new-event-count MAX_AUDIT_EVENTS_PER_CLINIC)
+      (begin
+        (map-set audit-events
+          { event-id: event-id }
+          {
+            clinic-id: clinic-id,
+            event-type: event-type,
+            actor: actor,
+            details: details,
+            timestamp: stacks-block-height,
+            block-height: stacks-block-height,
+            additional-data: additional-data
+          }
+        )
+        (map-set clinic-audit-counters
+          { clinic-id: clinic-id }
+          {
+            event-count: new-event-count,
+            last-event-id: event-id
+          }
+        )
+        (var-set next-audit-event-id (+ event-id u1))
+        true
+      )
+      false
+    )
+  )
+)
+
 (define-read-only (get-clinic-details (clinic-id uint))
   (map-get? clinics { clinic-id: clinic-id })
 )
@@ -494,4 +556,65 @@
 
 (define-read-only (get-donor-voting-power (donor principal))
   (get-voting-power donor)
+)
+
+(define-read-only (get-audit-event (event-id uint))
+  (map-get? audit-events { event-id: event-id })
+)
+
+(define-read-only (get-clinic-audit-summary (clinic-id uint))
+  (map-get? clinic-audit-counters { clinic-id: clinic-id })
+)
+
+(define-read-only (get-recent-audit-event-for-clinic (clinic-id uint))
+  (let
+    (
+      (audit-summary (map-get? clinic-audit-counters { clinic-id: clinic-id }))
+    )
+    (match audit-summary
+      summary
+      (map-get? audit-events { event-id: (get last-event-id summary) })
+      none
+    )
+  )
+)
+
+(define-read-only (get-total-audit-events)
+  (- (var-get next-audit-event-id) u1)
+)
+
+(define-read-only (verify-clinic-integrity (clinic-id uint))
+  (let
+    (
+      (clinic-data (map-get? clinics { clinic-id: clinic-id }))
+      (audit-summary (map-get? clinic-audit-counters { clinic-id: clinic-id }))
+    )
+    (match clinic-data
+      clinic
+      (match audit-summary
+        summary
+        {
+          clinic-exists: true,
+          total-events: (get event-count summary),
+          registration-verified: (> (get event-count summary) u0),
+          current-status: (get status clinic),
+          last-audit-event: (get last-event-id summary)
+        }
+        {
+          clinic-exists: true,
+          total-events: u0,
+          registration-verified: false,
+          current-status: (get status clinic),
+          last-audit-event: u0
+        }
+      )
+      {
+        clinic-exists: false,
+        total-events: u0,
+        registration-verified: false,
+        current-status: "not-found",
+        last-audit-event: u0
+      }
+    )
+  )
 )
