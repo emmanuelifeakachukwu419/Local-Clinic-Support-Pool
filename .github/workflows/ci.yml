@@ -1,0 +1,19 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  tests:
+    name: "Local Clinic Support Pool - Patient Incentive System"
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Checkout code"
+        uses: actions/checkout@v3
+      - name: "Check contract syntax"
+        uses: docker://hirosystems/clarinet:latest
+        with:
+          args: check
+        working-directory: ./clinic-support-pool
+      - name: "Run tests"
+        uses: docker://hirosystems/clarinet:latest
+        with:
+          args: test --coverage
+        working-directory: ./clinic-support-pool
