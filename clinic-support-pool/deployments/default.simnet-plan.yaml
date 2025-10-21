@@ -64,6 +64,11 @@ plan:
     - id: 0
       transactions:
         - emulated-contract-publish:
+            contract-name: medical-supply-tracker
+            emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+            path: contracts/medical-supply-tracker.clar
+            clarity-version: 3
+        - emulated-contract-publish:
             contract-name: patient-incentive-system
             emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
             path: contracts/patient-incentive-system.clar
