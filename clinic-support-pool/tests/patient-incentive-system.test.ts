@@ -88,6 +88,14 @@ describe("Patient Incentive System Tests", () => {
   });
 
   it("records patient visits and awards points", () => {
+    // First register the patient
+    simnet.callPublicFn(
+      "patient-incentive-system",
+      "register-patient",
+      [Cl.uint(1)],
+      wallet1
+    );
+    
     // Record a visit
     const { result } = simnet.callPublicFn(
       "patient-incentive-system",
@@ -132,6 +140,22 @@ describe("Patient Incentive System Tests", () => {
   });
 
   it("provides correct patient statistics", () => {
+    // First register the patient
+    simnet.callPublicFn(
+      "patient-incentive-system",
+      "register-patient",
+      [Cl.uint(1)],
+      wallet1
+    );
+    
+    // Record a visit to generate stats
+    simnet.callPublicFn(
+      "patient-incentive-system",
+      "record-visit",
+      [Cl.principal(wallet1), Cl.stringAscii("check-up"), Cl.uint(1)],
+      deployer
+    );
+    
     const { result } = simnet.callReadOnlyFn(
       "patient-incentive-system",
       "get-patient-stats",
