@@ -1,23 +1,13 @@
 [project]
-name = 'clinic-support-pool'
-description = ''
+name = "clinic-support-pool"
+description = ""
 authors = []
 telemetry = true
-cache_dir = '.\.cache'
-requirements = []
-[contracts.appointment-scheduler]
-path = 'contracts/appointment-scheduler.clar'
-clarity_version = 3
-epoch = 3.1
+cache_dir = "./.cache"
+
+[contracts.charity-donation-tracker]
+path = "contracts/charity-donation-tracker.clar"
+
 [repl.analysis]
-passes = ['check_checker']
-
-[repl.analysis.check_checker]
-strict = false
-trusted_sender = false
-trusted_caller = false
-callee_filter = false
-
-[repl.remote_data]
-enabled = false
-api_url = 'https://api.hiro.so'
+passes = ["check_checker"]
+check_checker = { trusted_sender = false, trusted_caller = false, callee_filter = false }

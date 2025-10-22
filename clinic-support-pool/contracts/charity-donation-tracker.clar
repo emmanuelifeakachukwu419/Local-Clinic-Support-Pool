@@ -137,7 +137,7 @@
     
     ;; Validate inputs
     (asserts! (is-valid-time-slot time-slot) ERR-INVALID-TIME-SLOT)
-    (asserts! (> appointment-date stacks-block-height) ERR-PAST-DATE)
+    (asserts! (> appointment-date block-height) ERR-PAST-DATE)
     (asserts! (get is-active clinic-info) ERR-INVALID-CLINIC-ID)
     
     ;; Check slot availability
@@ -156,8 +156,8 @@
           status: STATUS-PENDING,
           doctor: doctor,
           notes: notes,
-          created-at: stacks-block-height,
-          updated-at: stacks-block-height
+          created-at: block-height,
+          updated-at: block-height
         })
       
       ;; Update schedule slot
@@ -186,7 +186,7 @@
       { appointment-id: appointment-id }
       (merge appointment-info {
         status: STATUS-CONFIRMED,
-        updated-at: stacks-block-height
+        updated-at: block-height
       }))
     
     (ok true)))
@@ -202,7 +202,7 @@
       { appointment-id: appointment-id }
       (merge appointment-info {
         status: STATUS-CANCELLED,
-        updated-at: stacks-block-height
+        updated-at: block-height
       }))
     
     ;; Free up the time slot
