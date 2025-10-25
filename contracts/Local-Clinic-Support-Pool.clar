@@ -13,6 +13,10 @@
 (define-constant ERR_INSUFFICIENT_TIER (err u111))
 (define-constant ERR_INVALID_AUDIT_QUERY (err u112))
 (define-constant ERR_AUDIT_LOG_FULL (err u113))
+(define-constant ERR_SUBSCRIPTION_NOT_FOUND (err u114))
+(define-constant ERR_SUBSCRIPTION_ALREADY_EXISTS (err u115))
+(define-constant ERR_SUBSCRIPTION_NOT_DUE (err u116))
+(define-constant ERR_INVALID_FREQUENCY (err u117))
 
 (define-constant MIN_DONATION u1000000)
 (define-constant MIN_PERFORMANCE_SCORE u70)
@@ -23,11 +27,15 @@
 (define-constant GOLD_TIER_THRESHOLD u50000000)
 (define-constant PLATINUM_TIER_THRESHOLD u100000000)
 (define-constant MAX_AUDIT_EVENTS_PER_CLINIC u100)
+(define-constant MONTHLY_BLOCKS u4320)
+(define-constant QUARTERLY_BLOCKS u12960)
+(define-constant SUBSCRIPTION_BONUS_MULTIPLIER u110)
 
 (define-data-var total-pool-balance uint u0)
 (define-data-var next-clinic-id uint u1)
 (define-data-var oracle-address principal CONTRACT_OWNER)
 (define-data-var next-audit-event-id uint u1)
+(define-data-var next-subscription-id uint u1)
 
 (define-map clinics
   { clinic-id: uint }
@@ -100,6 +108,19 @@
 (define-map clinic-audit-counters
   { clinic-id: uint }
   { event-count: uint, last-event-id: uint }
+)
+
+(define-map recurring-subscriptions
+  { subscriber: principal }
+  {
+    subscription-id: uint,
+    amount: uint,
+    frequency-blocks: uint,
+    next-payment-block: uint,
+    total-payments: uint,
+    is-active: bool,
+    start-block: uint
+  }
 )
 
 (define-public (donate (amount uint))
@@ -297,6 +318,112 @@
     (try! (as-contract (stx-transfer? amount tx-sender CONTRACT_OWNER)))
     (var-set total-pool-balance (- (var-get total-pool-balance) amount))
     (ok amount)
+  )
+)
+
+(define-public (setup-recurring-donation (amount uint) (frequency (string-ascii 10)))
+  (let
+    (
+      (existing-sub (map-get? recurring-subscriptions { subscriber: tx-sender }))
+      (frequency-blocks (if (is-eq frequency "monthly") MONTHLY_BLOCKS (if (is-eq frequency "quarterly") QUARTERLY_BLOCKS u0)))
+      (subscription-id (var-get next-subscription-id))
+    )
+    (asserts! (is-none existing-sub) ERR_SUBSCRIPTION_ALREADY_EXISTS)
+    (asserts! (>= amount MIN_DONATION) ERR_INVALID_AMOUNT)
+    (asserts! (> frequency-blocks u0) ERR_INVALID_FREQUENCY)
+    
+    (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+    (var-set total-pool-balance (+ (var-get total-pool-balance) amount))
+    
+    (let
+      (
+        (previous-contribution (default-to { total-donated: u0, last-donation-block: u0 } (map-get? donor-contributions { donor: tx-sender })))
+        (bonus-amount (/ (* amount SUBSCRIPTION_BONUS_MULTIPLIER) u100))
+        (new-total (+ bonus-amount (get total-donated previous-contribution)))
+      )
+      (map-set donor-contributions
+        { donor: tx-sender }
+        {
+          total-donated: new-total,
+          last-donation-block: stacks-block-height
+        }
+      )
+      (update-donor-tier tx-sender new-total)
+    )
+    
+    (map-set recurring-subscriptions
+      { subscriber: tx-sender }
+      {
+        subscription-id: subscription-id,
+        amount: amount,
+        frequency-blocks: frequency-blocks,
+        next-payment-block: (+ stacks-block-height frequency-blocks),
+        total-payments: u1,
+        is-active: true,
+        start-block: stacks-block-height
+      }
+    )
+    (var-set next-subscription-id (+ subscription-id u1))
+    (ok subscription-id)
+  )
+)
+
+(define-public (process-recurring-donation)
+  (let
+    (
+      (subscription (unwrap! (map-get? recurring-subscriptions { subscriber: tx-sender }) ERR_SUBSCRIPTION_NOT_FOUND))
+    )
+    (asserts! (get is-active subscription) ERR_SUBSCRIPTION_NOT_FOUND)
+    (asserts! (>= stacks-block-height (get next-payment-block subscription)) ERR_SUBSCRIPTION_NOT_DUE)
+    
+    (let
+      (
+        (amount (get amount subscription))
+      )
+      (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+      (var-set total-pool-balance (+ (var-get total-pool-balance) amount))
+      
+      (let
+        (
+          (previous-contribution (default-to { total-donated: u0, last-donation-block: u0 } (map-get? donor-contributions { donor: tx-sender })))
+          (bonus-amount (/ (* amount SUBSCRIPTION_BONUS_MULTIPLIER) u100))
+          (new-total (+ bonus-amount (get total-donated previous-contribution)))
+        )
+        (map-set donor-contributions
+          { donor: tx-sender }
+          {
+            total-donated: new-total,
+            last-donation-block: stacks-block-height
+          }
+        )
+        (update-donor-tier tx-sender new-total)
+      )
+      
+      (map-set recurring-subscriptions
+        { subscriber: tx-sender }
+        (merge subscription
+          {
+            next-payment-block: (+ stacks-block-height (get frequency-blocks subscription)),
+            total-payments: (+ (get total-payments subscription) u1)
+          }
+        )
+      )
+      (ok amount)
+    )
+  )
+)
+
+(define-public (cancel-recurring-donation)
+  (let
+    (
+      (subscription (unwrap! (map-get? recurring-subscriptions { subscriber: tx-sender }) ERR_SUBSCRIPTION_NOT_FOUND))
+    )
+    (asserts! (get is-active subscription) ERR_SUBSCRIPTION_NOT_FOUND)
+    (map-set recurring-subscriptions
+      { subscriber: tx-sender }
+      (merge subscription { is-active: false })
+    )
+    (ok true)
   )
 )
 
@@ -615,6 +742,44 @@
         current-status: "not-found",
         last-audit-event: u0
       }
+    )
+  )
+)
+
+(define-read-only (get-subscription-details (subscriber principal))
+  (map-get? recurring-subscriptions { subscriber: subscriber })
+)
+
+(define-read-only (is-subscription-due (subscriber principal))
+  (let
+    (
+      (subscription (map-get? recurring-subscriptions { subscriber: subscriber }))
+    )
+    (match subscription
+      sub
+      (if (get is-active sub)
+        (some (>= stacks-block-height (get next-payment-block sub)))
+        (some false)
+      )
+      none
+    )
+  )
+)
+
+(define-read-only (get-subscription-stats (subscriber principal))
+  (let
+    (
+      (subscription (map-get? recurring-subscriptions { subscriber: subscriber }))
+    )
+    (match subscription
+      sub
+      (some {
+        total-contributed: (* (get amount sub) (get total-payments sub)),
+        payments-made: (get total-payments sub),
+        next-due-block: (get next-payment-block sub),
+        is-active: (get is-active sub)
+      })
+      none
     )
   )
 )
